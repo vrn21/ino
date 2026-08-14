@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="A minimal cloud coding agent powered by Codex and Modal." />
+  <title>ino — cloud coding agent</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="ino home"><span class="mark">i</span><span>ino</span></a>
+      <nav class="nav" aria-label="Main navigation">
+        <a class="settings-link" href="/settings" aria-label="Open settings" title="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.1 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H2V9.6h.4A1.7 1.7 0 0 0 4.1 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 8.5 4.1a1.7 1.7 0 0 0 1-.6A1.7 1.7 0 0 0 9.9 2h4.2a1.7 1.7 0 0 0 .4 1.5 1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.9 8.5a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1.1.4h.4v4.2h-.4a1.7 1.7 0 0 0-1.5.4 1.7 1.7 0 0 0-.7.5Z"/></svg>
+          <span class="nav-label">Settings</span>
+        </a>
+      </nav>
+    </header>
+
+    <main id="setup" class="setup-page">
+      <section class="composer-wrap" aria-labelledby="page-title">
+        <h1 id="page-title">What should I build?</h1>
+        <form id="session-form" class="composer" novalidate>
+          <label class="sr-only" for="prompt">Coding task</label>
+          <textarea id="prompt" required autofocus placeholder="Describe a task for ino…"></textarea>
+          <div class="composer-footer">
+            <details id="repo-picker" class="repo-picker">
+              <summary class="repo-trigger" aria-label="Choose repository">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .7a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.3c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .7Z"/></svg>
+                <span id="selected-repo">Choose repository</span>
+                <span class="chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="repo-popover">
+                <div class="repo-popover-head">
+                  <div><strong>Repository</strong><span id="repo-status" aria-live="polite">Loading repositories…</span></div>
+                  <label class="sr-only" for="repo-search">Search repositories</label>
+                  <input id="repo-search" type="search" placeholder="Search" disabled />
+                </div>
+                <div id="repo-list" class="repo-list" role="listbox" aria-label="GitHub repositories"></div>
+              </div>
+            </details>
+            <button id="start-session" class="send" type="submit" aria-label="Start session" title="Start session">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
+            </button>
+          </div>
+          <div id="form-error" class="error" role="alert" aria-live="assertive"></div>
+        </form>
+        <p class="hint"><span class="ready" aria-hidden="true"></span>Credentials required · ⌘ / Ctrl + Enter to start</p>
+      </section>
+    </main>
+
+    <main id="settings" class="settings-page hidden">
+      <a class="back-link" href="/">← Back to composer</a>
+      <p class="eyebrow">Account</p>
+      <h1>Settings</h1>
+      <p class="settings-lead">Manage the credentials ino uses to access repositories and run coding sessions.</p>
+      <div id="settings-notice" class="notice hidden" role="alert"></div>
+
+      <section class="settings-card" aria-labelledby="github-heading">
+        <div class="card-head">
+          <span class="provider-icon" aria-hidden="true">GH</span>
+          <div class="provider-copy">
+            <div class="title-row"><h2 id="github-heading">GitHub personal access token</h2><span id="github-status" class="credential-status" aria-live="polite"></span></div>
+            <p>Used to load repositories and clone private projects.</p>
+            <p class="credential-meta"><span class="status-dot" aria-hidden="true"></span>Value hidden · sent only for repository access and session start</p>
+          </div>
+          <div class="card-actions"><button id="save-github" class="secondary" type="button">Save / replace</button><button id="delete-github" class="text-button danger-text" type="button">Delete</button></div>
+        </div>
+        <div class="credential-editor">
+          <label for="github-token">Add or replace token</label>
+          <input id="github-token" type="password" autocomplete="new-password" placeholder="github_pat_…" aria-describedby="github-security" />
+          <p id="github-security" class="security-copy"><span aria-hidden="true">⌑</span> Stored in this browser only. ino never shows the credential value after saving.</p>
+        </div>
+      </section>
+
+      <section class="settings-card" aria-labelledby="openai-heading">
+        <div class="card-head">
+          <span class="provider-icon openai" aria-hidden="true">AI</span>
+          <div class="provider-copy">
+            <div class="title-row"><h2 id="openai-heading">OpenAI API key</h2><span id="openai-status" class="credential-status" aria-live="polite"></span></div>
+            <p>Your BYOS key is used only to start Codex inside your sandbox.</p>
+            <p class="credential-meta"><span class="status-dot" aria-hidden="true"></span>Value hidden · sent only when a session starts</p>
+          </div>
+          <div class="card-actions"><button id="save-openai" class="secondary" type="button">Save / replace</button><button id="delete-openai" class="text-button danger-text" type="button">Delete</button></div>
+        </div>
+        <div class="credential-editor">
+          <label for="openai-key">Add or replace API key</label>
+          <input id="openai-key" type="password" autocomplete="new-password" placeholder="sk-…" aria-describedby="openai-security" />
+          <p id="openai-security" class="security-copy"><span aria-hidden="true">⌑</span> Stored in this browser only. ino never shows the credential value after saving.</p>
+        </div>
+      </section>
+
+      <p class="persistence-notice"><strong>Credential persistence</strong><br />Stored credentials remain available in this browser across sessions. Deleting a credential removes it immediately and does not stop a session already running.</p>
+    </main>
+
+    <main id="workspace" class="workspace hidden">
+      <div class="session-bar">
+        <div class="session-title"><span id="workspace-repo">repository</span><strong id="workspace-task">Task</strong></div>
+        <div class="session-actions"><span id="session-status" class="status-badge">Starting</span><button id="stop-session" class="danger" type="button" title="Terminates the Modal sandbox">Stop session</button></div>
+      </div>
+      <div class="workspace-grid">
+        <section class="activity-panel">
+          <div class="panel-head"><h2>Activity</h2><span id="updated-at">Live</span></div>
+          <div class="objective"><span>Objective</span><p id="objective"></p></div>
+          <ol id="event-log" class="event-log" aria-live="polite"></ol>
+        </section>
+        <section class="computer-panel">
+          <div class="panel-head"><h2>Computer <span class="live-pill">CUA · VNC</span></h2><a id="open-vnc" class="secondary link-button" href="#" target="_blank" rel="noreferrer">Open ↗</a></div>
+          <div id="computer-empty" class="computer-empty"><div class="computer-icon">⌘</div><h3>Preparing the computer</h3><p>The VNC session appears here after Modal starts the sandbox.</p></div>
+          <iframe id="vnc-frame" class="vnc-frame hidden" title="Agent computer" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer"></iframe>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
