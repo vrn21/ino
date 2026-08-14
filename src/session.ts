@@ -1,14 +1,14 @@
 import { error, isRecord, json, readJson } from "./http";
-import { ModalAdapter } from "./modal";
-import type { ModalEnvironment } from "./modal";
-import { isValidByosCredentials } from "./secrets";
-import type { CodingSessionState, CreateSessionInput, MessageSessionInput, Repository, StartSessionInput } from "./types";
+import { ModalAdapter, modalMode } from "./modal";
+import type { ModalEnvironment, ModalRuntime } from "./modal";
+import { isValidByosCredentials, safeRuntimeError } from "./secrets";
+import type { CodingSessionState, CreateSessionInput, Repository, StartSessionInput } from "./types";
 
 const STATE_KEY = "session";
 const MAX_EVENTS = 200;
 const MAX_LOG_BYTES = 96 * 1024;
+const MAX_EVENT_MESSAGE_LENGTH = 8 * 1024;
 const MAX_PROMPT_LENGTH = 8_000;
-const MAX_MESSAGE_LENGTH = 2_000;
 
 function isRepository(value: unknown): value is Repository {
   if (!isRecord(value)
@@ -32,20 +32,38 @@ function isCreateInput(value: unknown): value is CreateSessionInput {
     && value.prompt.trim().length > 0 && value.prompt.length <= MAX_PROMPT_LENGTH;
 }
 
-function isMessageInput(value: unknown): value is MessageSessionInput {
-  return isRecord(value) && typeof value.message === "string"
-    && value.message.trim().length > 0 && value.message.length <= MAX_MESSAGE_LENGTH;
+function truncateUtf8(value: string, limit: number): string {
+  if (new TextEncoder().encode(value).byteLength <= limit) return value;
+  let end = value.length;
+  while (end > 0 && new TextEncoder().encode(value.slice(0, end)).byteLength > limit) end--;
+  return value.slice(0, end);
+}
+
+export function sanitizeOutput(output: string): string {
+  // Preserve normal agent output. Only redact recognizable credentials and headers.
+  return truncateUtf8(output
+    .replace(/sk(?:-[A-Za-z0-9_-]+)+/g, "[redacted OpenAI key]")
+    .replace(/github_pat_[A-Za-z0-9_]+/g, "[redacted GitHub token]")
+    .replace(/gh[pousr]_[A-Za-z0-9_]+/g, "[redacted GitHub token]")
+    .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[^\s]+/gi, "$1[redacted]"), MAX_EVENT_MESSAGE_LENGTH);
 }
 
 export class CodingSession implements DurableObject {
-  constructor(private readonly state: DurableObjectState, private readonly env: ModalEnvironment) {}
+  private readonly modal: ModalRuntime;
+
+  constructor(
+    private readonly state: DurableObjectState,
+    private readonly env: ModalEnvironment,
+    modal?: ModalRuntime,
+  ) {
+    this.modal = modal ?? new ModalAdapter(env);
+  }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/initialize") return this.initialize(request);
     if (request.method === "GET" && url.pathname === "/") return this.get();
     if (request.method === "POST" && url.pathname === "/start") return this.start(request);
-    if (request.method === "POST" && url.pathname === "/message") return this.message(request);
     if (request.method === "POST" && url.pathname === "/stop") return this.stop();
     return error("Route not found", 404);
   }
@@ -60,7 +78,7 @@ export class CodingSession implements DurableObject {
     const session: CodingSessionState = {
       id: this.state.id.toString(), status: "created", repo: input.repo, prompt: input.prompt.trim(),
       logs: [{ id: crypto.randomUUID(), at: now, type: "created", message: "Session created" }],
-      mode: this.env.MODAL_MODE === "remote" ? "remote" : "mock",
+      mode: modalMode(this.env),
       createdAt: now, updatedAt: now,
     };
     await this.save(session);
@@ -69,7 +87,9 @@ export class CodingSession implements DurableObject {
 
   private async get(): Promise<Response> {
     const session = await this.load();
-    return session ? json(session) : error("Session not found", 404);
+    if (!session) return error("Session not found", 404);
+    await this.sync(session);
+    return json(session);
   }
 
   private async start(request: Request): Promise<Response> {
@@ -85,45 +105,74 @@ export class CodingSession implements DurableObject {
     await this.save(session);
 
     try {
-      // Credentials are passed directly to launch and are deliberately not added to session or events.
-      const launched = await new ModalAdapter(this.env).launch({
-        sessionId: session.id, repository: session.repo, prompt: session.prompt, harness: "codex", credentials: input.credentials,
+      // Credentials are launch-only and are deliberately excluded from session state and events.
+      const launched = await this.modal.launch({
+        sessionId: session.id,
+        repository: session.repo,
+        prompt: session.prompt,
+        harness: "codex",
+        credentials: { ...input.credentials, githubToken: request.headers.get("x-github-token") ?? input.credentials.githubToken },
       });
       session.status = "running";
       session.modalSessionId = launched.id;
       session.vncUrl = launched.vncUrl;
-      this.addEvent(session, "started", session.mode === "mock" ? "Demo sandbox is running (Codex is not connected)" : "Codex is running");
+      this.addEvent(session, "started", session.mode === "mock" ? "Demo sandbox is running (Codex is not connected)" : "Codex is running in a Modal sandbox");
       await this.save(session);
       return json(session);
     } catch (cause) {
       session.status = "failed";
-      this.addEvent(session, "error", cause instanceof Error ? cause.message : "Modal launch failed");
+      this.addEvent(session, "error", safeRuntimeError(cause, "Unable to start the Modal sandbox"));
       await this.save(session);
       return json(session, 502);
     }
-  }
-
-  private async message(request: Request): Promise<Response> {
-    const input = await readJson<unknown>(request);
-    if (!isMessageInput(input)) return error("A message of at most 2,000 characters is required");
-    const session = await this.load();
-    if (!session) return error("Session not found", 404);
-    if (session.status !== "running") return error("Session is not running", 409);
-    // A production bridge would forward this to the Modal process. Polling retains its event trail.
-    this.addEvent(session, "message", input.message.trim());
-    await this.save(session);
-    return json(session);
   }
 
   private async stop(): Promise<Response> {
     const session = await this.load();
     if (!session) return error("Session not found", 404);
     if (session.status === "stopped") return json(session);
-    session.status = "stopped";
-    session.stoppedAt = new Date().toISOString();
-    this.addEvent(session, "stopped", "Session stopped");
-    await this.save(session);
-    return json(session);
+
+    try {
+      if (session.modalSessionId) await this.modal.terminate(session.modalSessionId);
+      session.status = "stopped";
+      session.stoppedAt = new Date().toISOString();
+      this.addEvent(session, "stopped", "Modal sandbox terminated");
+      await this.save(session);
+      return json(session);
+    } catch (cause) {
+      this.addEvent(session, "error", safeRuntimeError(cause, "Unable to terminate the Modal sandbox"));
+      await this.save(session);
+      return json(session, 502);
+    }
+  }
+
+  private async sync(session: CodingSessionState): Promise<void> {
+    if (session.status !== "running" || !session.modalSessionId || session.mode === "mock") return;
+    try {
+      const requestedOffset = session.modalLogOffset ?? 0;
+      const status = await this.modal.status(session.modalSessionId, requestedOffset);
+      const sanitizedLog = sanitizeOutput(status.log);
+      // A retrying bridge must not move the cursor backwards or duplicate an already-read chunk.
+      if (sanitizedLog && status.nextLogOffset > requestedOffset) this.addEvent(session, "output", sanitizedLog);
+      session.modalLogOffset = Math.max(requestedOffset, status.nextLogOffset);
+      if (status.agentExitCode !== undefined) {
+        session.status = status.agentExitCode === 0 ? "stopped" : "failed";
+        session.stoppedAt ??= new Date().toISOString();
+        this.addEvent(session, status.agentExitCode === 0 ? "completed" : "error", status.agentExitCode === 0
+          ? "Codex completed successfully"
+          : "Codex exited with an error");
+      } else if (status.sandboxExitCode !== null) {
+        session.status = status.sandboxExitCode === 0 ? "stopped" : "failed";
+        session.stoppedAt ??= new Date().toISOString();
+        this.addEvent(session, session.status === "stopped" ? "completed" : "error", session.status === "stopped"
+          ? "Modal sandbox completed"
+          : "Modal sandbox exited unexpectedly");
+      }
+      await this.save(session);
+    } catch (cause) {
+      this.addEvent(session, "error", safeRuntimeError(cause, "Unable to refresh Modal status"));
+      await this.save(session);
+    }
   }
 
   private async load(): Promise<CodingSessionState | undefined> { return this.state.storage.get<CodingSessionState>(STATE_KEY); }
@@ -132,7 +181,7 @@ export class CodingSession implements DurableObject {
     await this.state.storage.put(STATE_KEY, session);
   }
   private addEvent(session: CodingSessionState, type: CodingSessionState["logs"][number]["type"], message: string): void {
-    session.logs.push({ id: crypto.randomUUID(), at: new Date().toISOString(), type, message });
+    session.logs.push({ id: crypto.randomUUID(), at: new Date().toISOString(), type, message: truncateUtf8(message, MAX_EVENT_MESSAGE_LENGTH) });
     while (session.logs.length > MAX_EVENTS || JSON.stringify(session.logs).length > MAX_LOG_BYTES) session.logs.shift();
   }
 }

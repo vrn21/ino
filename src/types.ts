@@ -17,7 +17,7 @@ export interface Repository {
 export interface SessionEvent {
   id: string;
   at: string;
-  type: "created" | "started" | "message" | "stopped" | "error";
+  type: "created" | "started" | "output" | "completed" | "stopped" | "error";
   message: string;
 }
 
@@ -29,6 +29,8 @@ export interface CodingSessionState {
   logs: SessionEvent[];
   vncUrl?: string;
   modalSessionId?: string;
+  /** Byte offset used to fetch only new Codex output on the next poll. */
+  modalLogOffset?: number;
   mode: "mock" | "remote";
   createdAt: string;
   updatedAt: string;
@@ -41,17 +43,15 @@ export interface CreateSessionInput {
   prompt: string;
 }
 
-/** Never persisted. These values are used only while launching the remote job. */
+/** Never persisted. These values are used only while launching the remote sandbox. */
 export interface ByosCredentials {
   openaiApiKey: string;
+  /** Optional and ephemeral; used only to authenticate the initial git clone. */
+  githubToken?: string;
 }
 
 export interface StartSessionInput {
   credentials: ByosCredentials;
-}
-
-export interface MessageSessionInput {
-  message: string;
 }
 
 export interface ModalLaunchRequest {
@@ -66,6 +66,13 @@ export interface ModalLaunchRequest {
 export interface ModalLaunchResult {
   id: string;
   vncUrl?: string;
+}
+
+export interface ModalSandboxStatus {
+  log: string;
+  nextLogOffset: number;
+  agentExitCode?: number;
+  sandboxExitCode: number | null;
 }
 
 export interface ApiError {

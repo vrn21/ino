@@ -1,70 +1,138 @@
-import type { ModalLaunchRequest, ModalLaunchResult } from "./types";
+import type { ModalLaunchRequest, ModalLaunchResult, ModalSandboxStatus } from "./types";
+
+const BRIDGE_TIMEOUT_MS = 10_000;
+const MAX_LOG_BYTES = 8 * 1024;
 
 export interface ModalEnvironment {
+  /** Set only for intentionally local/demo sessions. Remote Modal is otherwise the default. */
   MODAL_MODE?: "mock" | "remote";
+  /** HTTPS URL for the Modal-hosted bridge, without a trailing slash. */
   MODAL_ENDPOINT?: string;
-  MODAL_TOKEN?: string;
-  MODAL_IMAGE?: string;
+  /** Bearer secret shared with the Modal-hosted bridge. */
+  MODAL_BRIDGE_TOKEN?: string;
 }
 
-/**
- * Expected by the optional Modal bridge endpoint. The bridge starts exactly one
- * Codex process and injects OPENAI_API_KEY only into that process environment.
- */
+export interface ModalRuntime {
+  launch(request: ModalLaunchRequest): Promise<ModalLaunchResult>;
+  status(sandboxId: string, logOffset: number): Promise<ModalSandboxStatus>;
+  terminate(sandboxId: string): Promise<void>;
+}
+
 export interface ModalBridgePayload {
   sessionId: string;
-  image: string;
-  command: ["codex", "exec", string];
-  environment: { OPENAI_API_KEY: string };
   repository: { fullName: string; defaultBranch: string; url: string };
+  prompt: string;
+  credentials: ModalLaunchRequest["credentials"];
 }
 
-export function buildModalBridgePayload(request: ModalLaunchRequest, env: ModalEnvironment): ModalBridgePayload {
+export function modalMode(env: ModalEnvironment): "mock" | "remote" {
+  if (env.MODAL_MODE === "mock") return "mock";
+  if (env.MODAL_MODE && env.MODAL_MODE !== "remote") throw new Error("Invalid Modal mode");
+  return "remote";
+}
+
+export function buildModalBridgePayload(request: ModalLaunchRequest): ModalBridgePayload {
   return {
     sessionId: request.sessionId,
-    image: env.MODAL_IMAGE ?? "ghcr.io/openai/codex:latest",
-    command: ["codex", "exec", request.prompt],
-    environment: { OPENAI_API_KEY: request.credentials.openaiApiKey },
     repository: {
       fullName: request.repository.fullName,
       defaultBranch: request.repository.defaultBranch,
       url: request.repository.url,
     },
+    prompt: request.prompt,
+    // The bridge must receive these only in the launch request. The Worker never persists them.
+    credentials: request.credentials,
   };
 }
 
-/**
- * Modal's public API is intentionally isolated behind a small bridge because a
- * running Codex container needs repo checkout and VNC provisioning. In mock
- * mode (the default) no external network call is made, allowing local demos.
- */
-export class ModalAdapter {
+function bridgeUrl(endpoint: string, path: string): string {
+  const url = new URL(endpoint);
+  if (url.protocol !== "https:") throw new Error("Modal bridge endpoint must use HTTPS");
+  const [pathname, search = ""] = path.split("?", 2);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}${pathname}`;
+  url.search = search;
+  return url.toString();
+}
+
+function boundedOffset(offset: number): number {
+  return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+}
+
+function limitUtf8(value: string, limit: number): string {
+  if (new TextEncoder().encode(value).byteLength <= limit) return value;
+  let end = value.length;
+  while (end > 0 && new TextEncoder().encode(value.slice(0, end)).byteLength > limit) end--;
+  return value.slice(0, end);
+}
+
+function checkedVncUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function responseJson(response: Response): Promise<Record<string, unknown>> {
+  if (!response.ok) throw new Error("Modal bridge request failed");
+  try {
+    const value = await response.json();
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    return value as Record<string, unknown>;
+  } catch {
+    throw new Error("Modal bridge returned an invalid response");
+  }
+}
+
+/** Fetch-only Modal bridge client; compatible with Cloudflare workerd. */
+export class ModalAdapter implements ModalRuntime {
   constructor(private readonly env: ModalEnvironment, private readonly fetcher: typeof fetch = fetch) {}
 
   async launch(request: ModalLaunchRequest): Promise<ModalLaunchResult> {
-    if (this.env.MODAL_MODE && this.env.MODAL_MODE !== "mock" && this.env.MODAL_MODE !== "remote") {
-      throw new Error("MODAL_MODE must be mock or remote");
-    }
-    if (this.env.MODAL_MODE !== "remote") {
+    if (modalMode(this.env) === "mock") {
       return { id: `mock-${request.sessionId}`, vncUrl: `https://mock-vnc.invalid/sessions/${request.sessionId}` };
     }
-
-    if (!this.env.MODAL_ENDPOINT || !this.env.MODAL_TOKEN) {
-      throw new Error("Modal remote mode requires MODAL_ENDPOINT and MODAL_TOKEN");
+    const result = await this.request("/launch", { method: "POST", body: JSON.stringify(buildModalBridgePayload(request)) });
+    if (typeof result.id !== "string" || result.id.length === 0 || result.id.length > 200) {
+      throw new Error("Modal bridge returned no sandbox id");
     }
+    return { id: result.id, vncUrl: checkedVncUrl(result.vncUrl) };
+  }
 
-    const response = await this.fetcher(`${this.env.MODAL_ENDPOINT.replace(/\/$/, "")}/launch`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.env.MODAL_TOKEN}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(buildModalBridgePayload(request, this.env)),
-    });
-    if (!response.ok) throw new Error(`Modal launch failed (${response.status})`);
+  async status(sandboxId: string, logOffset: number): Promise<ModalSandboxStatus> {
+    if (modalMode(this.env) === "mock") return { log: "", nextLogOffset: boundedOffset(logOffset), sandboxExitCode: null };
+    const result = await this.request(`/status/${encodeURIComponent(sandboxId)}?offset=${boundedOffset(logOffset)}`, { method: "GET" });
+    const log = typeof result.log === "string" ? result.log : "";
+    const nextLogOffset = typeof result.nextLogOffset === "number" ? boundedOffset(result.nextLogOffset) : boundedOffset(logOffset);
+    const agentExitCode = typeof result.agentExitCode === "number" && Number.isInteger(result.agentExitCode) ? result.agentExitCode : undefined;
+    const sandboxExitCode = typeof result.sandboxExitCode === "number" && Number.isInteger(result.sandboxExitCode)
+      ? result.sandboxExitCode
+      : null;
+    return { log: limitUtf8(log, MAX_LOG_BYTES), nextLogOffset, agentExitCode, sandboxExitCode };
+  }
 
-    const result = await response.json() as { id?: unknown; vncUrl?: unknown };
-    if (typeof result.id !== "string") throw new Error("Modal launch returned no job id");
-    return { id: result.id, vncUrl: typeof result.vncUrl === "string" ? result.vncUrl : undefined };
+  async terminate(sandboxId: string): Promise<void> {
+    if (modalMode(this.env) === "mock") return;
+    await this.request(`/terminate/${encodeURIComponent(sandboxId)}`, { method: "POST" });
+  }
+
+  private async request(path: string, init: RequestInit): Promise<Record<string, unknown>> {
+    if (!this.env.MODAL_ENDPOINT || !this.env.MODAL_BRIDGE_TOKEN) throw new Error("Modal bridge is not configured");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), BRIDGE_TIMEOUT_MS);
+    try {
+      return await responseJson(await this.fetcher(bridgeUrl(this.env.MODAL_ENDPOINT, path), {
+        ...init,
+        headers: {
+          authorization: `Bearer ${this.env.MODAL_BRIDGE_TOKEN}`,
+          "content-type": "application/json",
+        },
+        signal: controller.signal,
+      }));
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }

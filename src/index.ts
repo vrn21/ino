@@ -8,10 +8,12 @@ export { CodingSession };
 export interface Env {
   SESSIONS: DurableObjectNamespace;
   ASSETS: Fetcher;
+  /** Explicit demo-only override. Remote Modal is the default. */
   MODAL_MODE?: "mock" | "remote";
+  /** HTTPS endpoint for the Modal-hosted Sandbox bridge. */
   MODAL_ENDPOINT?: string;
-  MODAL_TOKEN?: string;
-  MODAL_IMAGE?: string;
+  /** Bearer secret shared with the Modal-hosted Sandbox bridge. */
+  MODAL_BRIDGE_TOKEN?: string;
 }
 
 function githubToken(request: Request): string | undefined {
@@ -52,7 +54,7 @@ export default {
       return response;
     }
 
-    const match = url.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(start|message|stop))?$/);
+    const match = url.pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(start|stop))?$/);
     if (!match) {
       if (url.pathname.startsWith("/api/")) return error("Route not found", 404);
       return env.ASSETS.fetch(request);
@@ -66,9 +68,11 @@ export default {
     const stub = sessionStub(env, id);
     if (!stub) return error("Session not found", 404);
     const body = action === "stop" ? undefined : request.body;
-    const headers = request.headers.get("content-type")
-      ? { "content-type": request.headers.get("content-type")! }
-      : undefined;
+    const headers: Record<string, string> = {};
+    const contentType = request.headers.get("content-type");
+    const ephemeralGithubToken = request.headers.get("x-github-token");
+    if (contentType) headers["content-type"] = contentType;
+    if (ephemeralGithubToken) headers["x-github-token"] = ephemeralGithubToken;
     return doRequest(stub, path, { method: request.method, headers, body });
   },
 } satisfies ExportedHandler<Env>;

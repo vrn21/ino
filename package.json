@@ -7,6 +7,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "bun test",
+    "test:shell": "sh bridge/test_shell_syntax.sh",
+    "test:bridge": "PYTHONPATH=bridge python3 -m pytest bridge/tests -q",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -14,5 +16,8 @@
     "bun-types": "^1.2.21",
     "typescript": "^5.8.3",
     "wrangler": "^4.31.0"
+  },
+  "dependencies": {
+    "@clerk/backend": "^3.16.5"
   }
 }
