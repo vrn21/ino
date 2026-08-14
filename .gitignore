@@ -3,3 +3,7 @@ node_modules/
 dist/
 .dev.vars
 .env
+
+# Python
+__pycache__/
+*.py[cod]
