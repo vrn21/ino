@@ -1,3 +1,4 @@
+import { ModalBridgeError } from "./modal";
 import type { ByosCredentials } from "./types";
 
 /**
@@ -12,6 +13,6 @@ export function isValidByosCredentials(value: unknown): value is ByosCredentials
 }
 
 /** Avoid reflecting provider errors or agent output that could include a submitted secret. */
-export function safeRuntimeError(_cause: unknown, fallback = "Modal operation failed"): string {
-  return fallback;
+export function safeRuntimeError(cause: unknown, fallback = "Modal operation failed"): string {
+  return cause instanceof ModalBridgeError ? `${fallback} (${cause.diagnostic()})` : fallback;
 }

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ModalBridgeError } from "../src/modal";
 import { isValidByosCredentials, safeRuntimeError } from "../src/secrets";
 
 test("BYOS validation requires a non-empty OpenAI key", () => {
@@ -11,4 +12,6 @@ test("BYOS validation requires a non-empty OpenAI key", () => {
 
 test("runtime errors do not reflect secret-bearing provider messages", () => {
   expect(safeRuntimeError(new Error("request failed for sk-synthetic-secret"))).toBe("Modal operation failed");
+  expect(safeRuntimeError(new ModalBridgeError("transport"))).toBe("Modal operation failed (bridge transport)");
+  expect(safeRuntimeError(new ModalBridgeError("http", 401))).toBe("Modal operation failed (bridge HTTP 401)");
 });
